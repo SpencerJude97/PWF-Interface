@@ -1,0 +1,8 @@
+name = "walk-finder-proxy"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# create with: npx wrangler kv namespace create KEYS   (then paste the printed id below)
+[[kv_namespaces]]
+binding = "KEYS"
+id = "PASTE_KV_NAMESPACE_ID_HERE"

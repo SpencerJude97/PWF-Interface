@@ -3,6 +3,12 @@ API_Key.txt
 .env
 .env.*
 !.env.example
+.dev.vars
+.dev.vars.*
+
+# dependencies and build output
+node_modules/
+.wrangler/
 
 # Python virtual environment
 venv/

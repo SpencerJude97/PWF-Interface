@@ -1,9 +1,11 @@
+import os
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import requests
+from urllib.parse import quote
 from geopy.geocoders import Nominatim
 
 class Feature(BaseModel):
@@ -61,10 +63,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-PROXIES = {
-    "http": "http://127.0.0.1:8080",
-    "https": "http://127.0.0.1:8080",
-}
+# remote proxy (Cloudflare Worker) that holds the Visual Crossing API key and forwards requests
+PROXY_BASE = os.environ["VC_PROXY_URL"].rstrip("/")  # e.g. https://tile-proxy.yourname.workers.dev
+PROXY_HEADERS = {"X-Proxy-Token": os.environ["VC_PROXY_TOKEN"]}
+
+# optional local intercepting proxy (e.g. for debugging); leave LOCAL_PROXY unset to disable
+LOCAL_PROXY = os.environ.get("LOCAL_PROXY")
+PROXIES = {"http": LOCAL_PROXY, "https": LOCAL_PROXY} if LOCAL_PROXY else None
+VERIFY_SSL = not LOCAL_PROXY  # local proxies intercepting HTTPS traffic need verification off
+
+
+# each user's API key is stored in the proxy; the browser only holds an opaque token that identifies it
+def Get_Token(x_user_token: str = Header(default=None)):
+    if not x_user_token:
+        raise HTTPException(status_code=401, detail="Missing API key token")
+    return x_user_token
+
+
+def Proxy_Headers(token=None):
+    headers = dict(PROXY_HEADERS)
+    if token:
+        headers["X-User-Token"] = token
+    return headers
 
 
 
@@ -106,9 +126,6 @@ settings = {
     "algorithm_distance": 0.1  # distance of potential locations from initial location in walk-finder algorithm
 }
 
-API_Key = ''
-
-
 @app.get("/preferences", response_model=Preferences)
 def Get_Preferences():
     return preferences
@@ -135,10 +152,10 @@ def Get_Location():
 
 # find the best location for a walk given the user's location and weather preferences
 @app.post("/location", response_model=Result)
-def Find_Walk(location: Location):
+def Find_Walk(location: Location, token: str = Depends(Get_Token)):
 
     # get weather data for user's current location
-    response = Request(location.settlement, location.country)
+    response = Request(location.settlement, location.country, token)
 
     '''
     if response.status_code != 200:
@@ -157,7 +174,7 @@ def Find_Walk(location: Location):
 
     for _ in range(settings["algorithm_steps"]):
         # apply one step of algorithm, replacing previous data and direction with that of new location
-        data, prev = Check_Potentials(data, prev)
+        data, prev = Check_Potentials(data, prev, token)
 
     # get name of settlement at location in final response output
     geolocator = Nominatim(user_agent="settlement_selector")
@@ -188,14 +205,14 @@ def Find_Walk(location: Location):
 
 
 @app.post("/week", response_model=List[Result])
-def Fetch_Week(staticData: StaticWeekData ):
+def Fetch_Week(staticData: StaticWeekData, token: str = Depends(Get_Token)):
 
     lat = staticData.lat
     lng = staticData.lng
     settlement = staticData.settlement
 
-    history = Request(lat, lng, "last3days").json()
-    forecast = Request(lat, lng, "next3days").json()
+    history = Request(lat, lng, token, "last3days").json()
+    forecast = Request(lat, lng, token, "next3days").json()
 
     week = []
 
@@ -234,66 +251,117 @@ def Fetch_Week(staticData: StaticWeekData ):
 class KeyModel(BaseModel):
     API_Key: str
 
-@app.post("/key", response_model=bool)
+
+# shared by both /key and /keyfile
+# hands the key to the proxy, which validates and stores it, and returns the token identifying it
+def Register_Key(api_key: str) -> str:
+    try:
+        resp = requests.post(
+            f"{PROXY_BASE}/register",
+            json={"key": api_key},
+            headers=Proxy_Headers(),
+            proxies=PROXIES,
+            verify=VERIFY_SSL,
+            timeout=10,
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Key service unreachable")
+
+    if resp.status_code == 200:
+        return resp.json()["token"]
+    if resp.status_code == 400:
+        raise HTTPException(status_code=400, detail="Invalid API key")
+    raise HTTPException(status_code=502, detail="Could not verify key")
+
+@app.post("/key", response_model=str)
 def Save_Key(key: KeyModel):
+    return Register_Key(key.API_Key)
 
-    global API_Key
-    API_Key = key.API_Key
-
-    test = Request("London","UK")
-
-    if test.status_code == 200:
-        return True
-
-    API_Key = ''
-    return False
-
-'''
-@app.get("/key", response_model=str)
-def Get_Key():
-    return API_Key
-'''
-
-@app.get("/keyfile", response_model=bool)
+@app.get("/keyfile", response_model=str)
 def Get_Keyfile():
-
-    global API_Key
-    with open("../API_Key.txt") as f:
-        API_Key =  f.read().strip()
-
-    test = Request("London", "UK")
-
-    if test.status_code == 200:
-        return True
-
-    API_Key = ''
-    return False
+    try:
+        with open("../API_Key.txt") as f:
+            api_key = f.read().strip()
+    except OSError:
+        raise HTTPException(status_code=404, detail="Key file not found")
+    return Register_Key(api_key)
 
 
-# requests relevant data from API, using either settlement/country names or lat/lng values
-def Request(town_or_lat, country_or_lng, period = "today"):
-    # convert list of non-zero weighted features to string for use in request url
-    str_elements = "temp,humidity,cloudcover,precip"
-    units = settings["unit_system"]
-    location = str(town_or_lat) + "," + str(country_or_lng)
+# asks the proxy to delete the stored key for this token
+@app.delete("/key", status_code=204)
+def Delete_Key(token: str = Depends(Get_Token)):
+    try:
+        requests.delete(
+            f"{PROXY_BASE}/register",
+            headers=Proxy_Headers(token),
+            proxies=PROXIES,
+            verify=VERIFY_SSL,
+            timeout=10,
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Key service unreachable")
 
-    '''
-    if town_or_lat:
-        location = str(town_or_lat) + "," + str(country_or_lng)
-    else:
-        return
-    '''
 
-    # request data at given location, for today's date, for relevant features
-    return requests.get(
-        f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location}/{period}?key={API_Key}&unitGroup={units}&include=current&elements={str_elements}&options=usev2forecast",
-        proxies = PROXIES,
-        verify = False  # [Required for local proxies intercepting HTTPS traffic
+MAP_ELEMENTS = {"temp", "cloudcover", "precipcomposite"}
+
+
+# proxies weather map tiles so the API key never has to be sent to the browser
+@app.get("/tiles/{element}/{z}/{x}/{y}")
+def Get_Tile(element: str, z: int, x: int, y: int, token: str = Query(...), time: str = "latest"):
+    if element not in MAP_ELEMENTS:
+        raise HTTPException(status_code=400, detail="Unknown map element")
+
+    try:
+        upstream = requests.get(
+            f"{PROXY_BASE}/tiles/{element}/{z}/{x}/{y}",
+            params={"time": time},
+            headers=Proxy_Headers(token),
+            proxies=PROXIES,
+            verify=VERIFY_SSL,
+            timeout=10,
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Tile proxy unreachable")
+
+    if upstream.status_code != 200:
+        raise HTTPException(status_code=upstream.status_code, detail="Tile request failed")
+
+    return Response(
+        content=upstream.content,
+        media_type="image/webp",
+        headers={"Cache-Control": "public, max-age=600"},
     )
 
 
+# requests relevant data from API, using either settlement/country names or lat/lng values
+def Request(town_or_lat, country_or_lng, token, period="today"):
+    location = quote(f"{town_or_lat},{country_or_lng}", safe=",")
+
+    try:
+        response = requests.get(
+            f"{PROXY_BASE}/timeline/{location}/{period}",
+            params={
+                "unitGroup": settings["unit_system"],
+                "include": "current",
+                "elements": "temp,humidity,cloudcover,precip",
+                "options": "usev2forecast",
+            },
+            headers=Proxy_Headers(token),
+            proxies=PROXIES,
+            verify=VERIFY_SSL,
+            timeout=10,
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Weather service unreachable")
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text[:200])
+
+    return response
+
+
 # a single step of the walk-finder algorithm
-def Check_Potentials(base, prev=None):
+def Check_Potentials(base, prev=None, token=None):
     # if initial location was best at last step, just return initial location
     if prev == "base":
         return base, "base"
@@ -308,13 +376,13 @@ def Check_Potentials(base, prev=None):
 
     # append data for locations in four cardinal directions from initial location
     if prev != "south":  # do not check the direction of the previous step's initial location
-        potentials.append((Request(lat + dist, lng).json(), "north"))
+        potentials.append((Request(lat + dist, lng, token).json(), "north"))
     if prev != "north":
-        potentials.append((Request(lat - dist, lng).json(), "south"))
+        potentials.append((Request(lat - dist, lng, token).json(), "south"))
     if prev != "west":
-        potentials.append((Request(lat, lng + dist).json(), "east"))
+        potentials.append((Request(lat, lng + dist, token).json(), "east"))
     if prev != "east":
-        potentials.append((Request(lat, lng - dist).json(), "west"))
+        potentials.append((Request(lat, lng - dist, token).json(), "west"))
 
     # index of best location in `potentials`, initialised as that of initial location
     best = 0
@@ -345,33 +413,6 @@ def Cost(data):
         cost += elem_data["weight"] * abs(val - elem_data["value"]) / elem_data["scale"]
 
     return cost
-
-
-MAP_ELEMENTS = {"temp", "cloudcover", "precipcomposite"}
-
-@app.get("/tiles/{element}/{z}/{x}/{y}")
-def Get_Tile(element: str, z: int, x: int, y: int, time: str = "latest"):
-    # whitelist elements so the path can't be used to hit arbitrary API routes
-    if element not in MAP_ELEMENTS:
-        raise HTTPException(status_code=400, detail="Unknown map element")
-    if not API_Key:
-        raise HTTPException(status_code=400, detail="API key is required")
-
-    upstream = requests.get(
-        f"https://maps.visualcrossing.com/VisualCrossingWebServices/rest/api/v1/map/tile/{element}/{z}/{x}/{y}.webp",
-        params={"api_key": API_Key, "time": time, "options": "usev2forecast"},
-        proxies = PROXIES,
-        verify = False
-    )
-
-    if upstream.status_code != 200:
-        raise HTTPException(status_code=upstream.status_code, detail="Tile request failed")
-
-    return Reponse(
-        content=upstream.content,
-        media_type="image/webp",
-        headers={"Cache-Control": "public, max-age=600"}   # avoid re-fetching tiles on every pan
-    )
 
 
 

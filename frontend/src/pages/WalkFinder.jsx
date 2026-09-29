@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link } from "react-router-dom";
-import api from "../api.js";
+import api, { getToken } from "../api.js";
 import BoundForm from '../components/BoundForm.jsx';
 import L from "leaflet"
 import Slider from "@mui/material/Slider";
@@ -20,12 +20,17 @@ const WalkFinder = () => {
       setResult(response.data);
     } catch (error) {
       console.error("Error finding location", error);
+      setErrorMSG(error.response?.data?.detail ?? "Could not find a walk")
     }
   };
 
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const [mapElement, setMapElement] = useState("temp")
+
+  // tiles are proxied through the backend; <img> requests can't send headers, so the token goes in the query string
+  const buildTileUrl = (element, time) =>
+    `${api.defaults.baseURL}/tiles/${element}/{z}/{x}/{y}?time=${encodeURIComponent(time)}&token=${encodeURIComponent(getToken() ?? "")}`;
 
   function getISOTimestampFromVariable(x) {
     if (x === undefined || x === null) return "latest";
@@ -39,7 +44,6 @@ const WalkFinder = () => {
   useEffect(() => {
     if (result && mapContainerRef.current) {
       if (!mapInstanceRef.current) {
-        const element = mapElement;
         const time = getISOTimestampFromVariable(dates.indexOf(date) !== -1 ? dates.indexOf(date) : 3);
         const tilesUrlTemplate = buildTileUrl(mapElement, time);
 
@@ -70,7 +74,7 @@ const WalkFinder = () => {
     const map = mapInstanceRef.current
     const weatherLayer = weatherLayerRef.current;
 
-    if (mapWeather) {
+    if (map && weatherLayer && mapWeather) {
       map.addLayer(weatherLayer);
     }
 
@@ -103,7 +107,7 @@ const WalkFinder = () => {
   }
 
   useEffect(() => {
-    if (weatherLayerRef.current && API_Key) {
+    if (weatherLayerRef.current) {
       const index = dates.indexOf(date);
       const time = getISOTimestampFromVariable(index !== -1 ? index : 3);
       weatherLayerRef.current.setUrl(buildTileUrl(mapElement, time));
@@ -155,21 +159,6 @@ const WalkFinder = () => {
   const [townPlaceholder, setTownPlaceholder] = useState("Enter town/city")
   const [countryPlaceholder, setCountryPlaceholder] = useState("Enter country")
 
-  /*
-  const fetchKey = async () => {
-    try {
-      const response = await api.get('/key');
-      setAPI_Key(response.data);
-    } catch (error) {
-      console.error("Error fetching key", error);
-    }
-  }
-  */
-
-  useEffect(() => {
-    fetchKey();
-  }, []);
-
 
   const [weekData, setWeekData] = useState('')
 
@@ -197,10 +186,6 @@ const WalkFinder = () => {
   const handleMapElementChange = (e) => {
     setMapElement(e.target.value);
   }
-
-
-  const buildTileUrl = (element, time) =>
-    `${api.defaults.baseURL}/tiles/${element}/{z}/{x}/{y}?time=${encodeURIComponent(time)}`;
 
 
 
