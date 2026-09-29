@@ -39,12 +39,9 @@ const WalkFinder = () => {
   useEffect(() => {
     if (result && mapContainerRef.current) {
       if (!mapInstanceRef.current) {
-        const apiKey = API_Key;
         const element = mapElement;
         const time = getISOTimestampFromVariable(dates.indexOf(date) !== -1 ? dates.indexOf(date) : 3);
-        const tilesUrlTemplate =
-          "https://maps.visualcrossing.com/VisualCrossingWebServices/rest/api/v1/map/" +
-          "tile/" + element + "/{z}/{x}/{y}.webp?apikey=" + apiKey + "&time=" + time + "&options=usev2forecast";
+        const tilesUrlTemplate = buildTileUrl(mapElement, time);
 
         const map = L.map(mapContainerRef.current).setView([result.lat, result.lng], 10);
         const marker = L.marker([result.lat, result.lng]).addTo(map);
@@ -88,7 +85,7 @@ const WalkFinder = () => {
   const [mapWeather , setMapWeather] = useState(false);
   const weatherLayerRef = useRef(null);
   const [date, setDate] = useState('')
-  const [API_Key, setAPI_Key] = useState('')
+  // const [API_Key, setAPI_Key] = useState('')
 
   const handleMapWeatherChange = () => {
 
@@ -109,13 +106,9 @@ const WalkFinder = () => {
     if (weatherLayerRef.current && API_Key) {
       const index = dates.indexOf(date);
       const time = getISOTimestampFromVariable(index !== -1 ? index : 3);
-      const element = mapElement;
-
-      const newUrl = `https://maps.visualcrossing.com/VisualCrossingWebServices/rest/api/v1/map/tile/${element}/{z}/{x}/{y}.webp?apikey=${API_Key}&time=${time}`;
-
-      weatherLayerRef.current.setUrl(newUrl);
+      weatherLayerRef.current.setUrl(buildTileUrl(mapElement, time));
     }
-  }, [date, API_Key, mapElement]);
+  }, [date, mapElement]);
 
 
 
@@ -162,6 +155,7 @@ const WalkFinder = () => {
   const [townPlaceholder, setTownPlaceholder] = useState("Enter town/city")
   const [countryPlaceholder, setCountryPlaceholder] = useState("Enter country")
 
+  /*
   const fetchKey = async () => {
     try {
       const response = await api.get('/key');
@@ -170,6 +164,7 @@ const WalkFinder = () => {
       console.error("Error fetching key", error);
     }
   }
+  */
 
   useEffect(() => {
     fetchKey();
@@ -202,6 +197,10 @@ const WalkFinder = () => {
   const handleMapElementChange = (e) => {
     setMapElement(e.target.value);
   }
+
+
+  const buildTileUrl = (element, time) =>
+    `${api.defaults.baseURL}/tiles/${element}/{z}/{x}/{y}?time=${encodeURIComponent(time)}`;
 
 
 
