@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -248,11 +248,9 @@ def Save_Key(key: KeyModel):
     API_Key = ''
     return False
 
-'''
 @app.get("/key", response_model=str)
 def Get_Key():
     return API_Key
-'''
 
 @app.get("/keyfile", response_model=bool)
 def Get_Keyfile():
@@ -345,33 +343,6 @@ def Cost(data):
         cost += elem_data["weight"] * abs(val - elem_data["value"]) / elem_data["scale"]
 
     return cost
-
-
-MAP_ELEMENTS = {"temp", "cloudcover", "precipcomposite"}
-
-@app.get("/tiles/{element}/{z}/{x}/{y}")
-def Get_Tile(element: str, z: int, x: int, y: int, time: str = "latest"):
-    # whitelist elements so the path can't be used to hit arbitrary API routes
-    if element not in MAP_ELEMENTS:
-        raise HTTPException(status_code=400, detail="Unknown map element")
-    if not API_Key:
-        raise HTTPException(status_code=400, detail="API key is required")
-
-    upstream = requests.get(
-        f"https://maps.visualcrossing.com/VisualCrossingWebServices/rest/api/v1/map/tile/{element}/{z}/{x}/{y}.webp",
-        params={"api_key": API_Key, "time": time, "options": "usev2forecast"},
-        proxies = PROXIES,
-        verify = False
-    )
-
-    if upstream.status_code != 200:
-        raise HTTPException(status_code=upstream.status_code, detail="Tile request failed")
-
-    return Reponse(
-        content=upstream.content,
-        media_type="image/webp",
-        headers={"Cache-Control": "public, max-age=600"}   # avoid re-fetching tiles on every pan
-    )
 
 
 
